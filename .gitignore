@@ -1,3 +1,5 @@
 *.mat
 *.csv
 *.json
+*.ipynb
+repomix*
