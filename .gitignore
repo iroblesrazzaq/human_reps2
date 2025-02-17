@@ -2,4 +2,6 @@
 *.csv
 *.json
 *.ipynb
-repomix*
+repomix* 
+
+!data_structures.ipynb
