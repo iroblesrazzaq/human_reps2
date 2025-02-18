@@ -9,15 +9,6 @@ import re
 import os
 import json
 
-@dataclass
-class RecordingInfo:
-    """Contains metadata about a recording session"""
-    start_unix: float
-    end_unix: float
-    experiment_type: str  # e.g., 'movie', 'preSleep', 'postSleep'
-
-# %%
-@dataclass
 class Neuron:
     """
     Class for a single Neuron in a single patient
@@ -25,13 +16,19 @@ class Neuron:
     area: str | None  recording area
     spikes: list | np.ndarray all spike times (in seconds)
     """
-    neuron_id: str
-    pid: str
-    spike_times: np.ndarray
-    area: str | None = None
-    metadata: dict | None = None
+    def __init__(self,
+        neuron_id: str,
+        pid: str,
+        spike_times: np.ndarray,
+        area: str | None = None,
+        metadata: dict | None = None):
+
+        self.neuron_id = neuron_id
+        self.pid = pid
+        self.spike_times = spike_times
+        self.area = area
+        self.metadata = metadata
     
-    @property
     def firing_rate(self, window: Tuple[float, float] = None) -> float:
         """
         Function to get firing rate of neuron within a certain time period (default whole recording)
@@ -50,8 +47,6 @@ class Neuron:
         return len(spikes) / duration
         
 
-
-# %%
 class PatientData:
     """
     Contains all relevant information for a single patient
@@ -84,11 +79,6 @@ class PatientData:
         
         self.preSleep_concepts = self.times_dict['rel_preSleep_concept_vocalizations']
         self.postSleep_concepts = self.times_dict['rel_postSleep_concept_vocalizations']
-
-
-
-        # timing_info = d.get_timing_info(pid=self.pid)
-
 
 
     def _get_relative_times(self) -> Dict[str, str]:
@@ -137,6 +127,129 @@ class PatientData:
             times_dict['rel_postSleep_concept_vocalizations'] = rel_postSleep_concept_vocalizations
 
         return times_dict
+    
+    def _bin_time(self, time: float, neurons: list[Neuron], bin_size=1.0, offset: float = 0.2) -> np.ndarray:
+        """
+        returns the firing rate of a list of neurons for a certain window
+            - does not track individual neurons consistently
+            - can add functionality to do so by adding neuron id dimension?
+            - not necessary as of now
+
+
+        input: 
+            time (float): time that we want to bin
+            offset (float): offset of bin start from time, default is 0.2 seconds
+            bin_size (float): size of bin in seconds
+            neurons: list of neurons that we want to bin at this time
+
+        returns: np.ndarray of shape (n_neurons)
+        """
+        assert isinstance(neurons, list)
+        assert isinstance(neurons[0], Neuron)
+
+        left_edge = time + offset
+        right_edge = left_edge + bin_size
+
+        firing_rates = np.zeros(len(neurons), dtype=float)
+
+        for i, neuron in enumerate(neurons):
+            firing_rates[i] = neuron.firing_rate(window=(left_edge, right_edge))
+        return firing_rates
+    
+    def _bin_times(self, times: List[float], neurons: List[Neuron], bin_size=1.0, offset=0.2) -> np.ndarray:
+        """Calls bin time on times, returns array of shape (neurons, time) -> each columns is firing rate in a certain time window"""
+        if not isinstance(times, list):
+            raise TypeError("'times' must be a list.")
+
+        all_binned_rates = []
+        for time in times:
+            binned_rates = self._bin_time(time=time, neurons=neurons, bin_size=bin_size, offset=offset)
+            all_binned_rates.append(binned_rates)
+
+        return np.array(all_binned_rates) # get (n_times, n_neurons)
+    
+    def exclusive_movie_times(self, c1: str, c2: str, time_present: float = 1.0) -> np.ndarray:
+        """
+        Takes two concepts in movie and returns all times for c1 exclusive onsets wrt c2:
+        c1 absent to present, present for at least one second, and c2 absent whole time
+
+        NOTE: for concept decoding, need to call both ways
+        
+        """
+
+        if c1 not in self.movie_df.columns or c2 not in self.movie_df.columns:
+            raise ValueError("Both concepts must be valid columns in movie_df.")
+
+        df = self.movie_df
+
+        c1_onsets = []
+        for i in range(1, len(df)):
+            # 1. Check for c1 transition from 0 to 1
+            if df[c1].iloc[i - 1] == 0 and df[c1].iloc[i] == 1:
+                # 2. Check if c2 is 0 at the onset time
+                if df[c2].iloc[i] == 0 and df[c2].iloc[i - 1] == 0:
+                    onset_time = df['rel_corrected_time_sec'].iloc[i]
+                    next_second_end = onset_time + time_present
+
+                    # 3. Find the range of indices for the next second
+                    next_second_indices = df.index[
+                        (df['rel_corrected_time_sec'] >= onset_time) &
+                        (df['rel_corrected_time_sec'] < next_second_end)
+                    ]
+                    
+                    # 4. Check if c1 is *always* 1 and c2 is *always* 0 within the next second
+                    if (all(df[c1].iloc[next_second_indices] == 1) and
+                        all(df[c2].iloc[next_second_indices] == 0)):
+                        c1_onsets.append(onset_time)
+
+        return np.array(c1_onsets)
+
+    def exclusive_recall_times(self, c1: str, c2: str, epoch: str, buffer=2.0) -> np.ndarray:
+        """
+        Finds all times where c1 is recalled and c2 is not recalled within 
+        the buffer on either side of the c1 recall time
+        
+        Input: 
+            epoch: str - preSleep or postSleep
+
+        NOTE: for concept decoding, need to call both ways
+        """
+        raise NotImplementedError
+        
+    def get_concept_data(self, c1: str, c2: str, epoch: str):
+        """
+        Concerns: how to filter neurons: option for brain area, potentially neuron id?
+
+        returns the concept bins for two concepts
+        what do we do with movie 
+        """
+        
+
+        if epoch == 'movie':
+            c1_times = list(self.exclusive_movie_times(c1=c1, c2=c2))
+            c2_times = list(self.exclusive_movie_times(c1=c2, c2=c1))
+
+            c1_bins = self._bin_times(c1_times, neurons=self.neurons) # use default 1s bin 0.2s offset
+            c2_bins = self._bin_times(c2_times, neurons=self.neurons)
+
+            return c1_bins, c2_bins # each row is a response
+
+        elif epoch == 'preSleep_recall':
+
+            raise NotImplementedError
+        elif epoch == 'postSleep_recall':
+
+            raise NotImplementedError
+
+        else:
+            raise Exception("invalid epoch name")
+
+    def filter_neurons_by_area(self, areas: List[str]) -> List[Neuron]:
+        """
+        returns list of neurons with areas inputted only
+        """
+        raise NotImplementedError
+
 
 class Dataloader:
     """Class to contain functions to load data"""
