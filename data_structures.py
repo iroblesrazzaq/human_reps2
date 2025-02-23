@@ -216,14 +216,15 @@ class PatientData:
         """
         raise NotImplementedError
         
-    def get_concept_data(self, c1: str, c2: str, epoch: str):
+    def get_concept_data(self, c1: str, c2: str, epoch: str, neurons=None):
         """
         Concerns: how to filter neurons: option for brain area, potentially neuron id?
 
         returns the concept bins for two concepts
         what do we do with movie 
         """
-        
+        if not neurons:
+            neurons=self.neurons
 
         if epoch == 'movie':
             c1_times = list(self.exclusive_movie_times(c1=c1, c2=c2))
@@ -243,6 +244,9 @@ class PatientData:
 
         else:
             raise Exception("invalid epoch name")
+    
+    def filter_neurons_by_fr(self, window: Tuple[float, float] | None, threshold: float):
+        return [neuron for neuron in self.neurons if neuron.firing_rate(window=window) >= threshold]
 
     def filter_neurons_by_area(self, areas: List[str]) -> List[Neuron]:
         """
