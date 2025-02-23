@@ -1,7 +1,6 @@
 *.mat
 *.csv
 *.json
-*.ipynb
 repomix* 
 
 !data_structures.ipynb
