@@ -267,11 +267,13 @@ class PatientData:
                 filtered_neurons.append(neuron)
         return filtered_neurons
     
-    def filter_mtl_neurons(self):
+    def filter_mtl_neurons(self, neurons: List[Neuron]):
         """Filters neurons to keep only MTL neurons"""
 
         relevant_areas = self.mtl_areas_dict[self.pid]
-        mtl_area_filtered_neurons = self.filter_neurons_by_area(relevant_areas)
+
+        mtl_area_filtered_neurons = self.filter_neurons_by_area(neurons=neurons, areas=relevant_areas)
+        
         return mtl_area_filtered_neurons
     
 

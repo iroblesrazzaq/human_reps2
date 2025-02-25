@@ -11,7 +11,7 @@ from typing import Dict, List
 from sklearn.metrics import accuracy_score, roc_auc_score
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+from tqdm import tqdm
 
 @dataclass
 class DecodingResult:
@@ -326,7 +326,7 @@ class DecodingResultsManager:
         Stores the DecodingResult in the self.results dictionary.
         """
         self.results = {} # reset results every time
-        for c1, c2 in self.concept_pairs:
+        for c1, c2 in tqdm(self.concept_pairs, desc=f"Decoding for {self.patient_data.pid}"):
             decoder = ConceptDecoder(
                     patient_data=self.patient_data,
                     c1=c1,
@@ -338,7 +338,7 @@ class DecodingResultsManager:
                 )
             if decoder.enough_data: # efficient way of not rechecking for sufficient samples
                 for i in range(num_iter):
-                    print(f"concept decoding: {c1} vs {c2}, iteration #{i}")
+                    #print(f"concept decoding: {c1} vs {c2}, iteration #{i}")
                     if self.pseudo:
                         if self.pseudo_params:
                             result = decoder.decode_pseudo(**self.pseudo_params)
