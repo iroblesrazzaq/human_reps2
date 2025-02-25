@@ -234,8 +234,8 @@ class PatientData:
             c1_times = list(self.exclusive_movie_times(c1=c1, c2=c2))
             c2_times = list(self.exclusive_movie_times(c1=c2, c2=c1))
 
-            c1_bins = self._bin_times(c1_times, neurons=self.neurons) # use default 1s bin 0.2s offset
-            c2_bins = self._bin_times(c2_times, neurons=self.neurons)
+            c1_bins = self._bin_times(c1_times, neurons=neurons) # use default 1s bin 0.2s offset
+            c2_bins = self._bin_times(c2_times, neurons=neurons)
 
             return c1_bins, c2_bins # each row is a response
 
