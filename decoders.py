@@ -87,7 +87,7 @@ class ConceptPairDataset():
         """
         c1_data, c2_data = self.patient_data.get_concept_data(c1=self.c1, c2=self.c2, epoch=self.epoch, neurons=self.neurons)
 
-        print(f"c1 shape: {c1_data.shape[0]}, c2 shape: {c2_data.shape[0]}")
+        #print(f"c1 shape: {c1_data.shape[0]}, c2 shape: {c2_data.shape[0]}")
 
         if len(c1_data) < self.min_samples or len(c2_data) < self.min_samples:
             raise ValueError(f"Insufficient samples for {self.c1} vs {self.c2}")
@@ -113,7 +113,7 @@ class ConceptPairDataset():
         """
         c1_data, c2_data = self.patient_data.get_concept_data(c1=self.c1, c2=self.c2, epoch=self.epoch, neurons=self.neurons)
         
-        print(f"c1 shape: {c1_data.shape[0]}, c2 shape: {c2_data.shape[0]}")
+        #print(f"c1 shape: {c1_data.shape[0]}, c2 shape: {c2_data.shape[0]}")
         
         if len(c1_data) < self.min_samples or len(c2_data) < self.min_samples:
             raise ValueError(f"Insufficient samples for {self.c1} vs {self.c2}")
@@ -121,7 +121,7 @@ class ConceptPairDataset():
         # Split real data into train and test sets
         c1_train_real, c1_test_real = train_test_split(c1_data, test_size=test_size)
         c2_train_real, c2_test_real = train_test_split(c2_data, test_size=test_size)
-        print(f"c1 real train size: {c1_train_real.shape[0]}")
+        #print(f"c1 real train size: {c1_train_real.shape[0]}")
         
         # Calculate needed pseudo samples
         n_pseudo_train_c1 = max(0, train_size_total - len(c1_train_real))
@@ -218,14 +218,14 @@ class ConceptDecoder:
         try:
             _, _ = self.dataset.create_dataset_normal()
         except ValueError as e:
-            print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
+            #print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
             self.enough_data = False
         
     def decode_normal(self, test_size=0.3):
         try:
             data_dict, info = self.dataset.create_dataset_normal(test_size=test_size)
         except ValueError as e:
-            print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
+            #print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
             return None # Return None to indicate decoding failure for this pair
         return self._decode(data_dict=data_dict)
 
@@ -234,7 +234,7 @@ class ConceptDecoder:
         try:
             data_dict, info = self.dataset.create_dataset_pseudo(test_size=test_size, train_size_total=train_size_total, test_size_total=test_size_total)
         except ValueError as e:
-            print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
+            #print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
             return None # Return None to indicate decoding failure for this pair
         return self._decode(data_dict=data_dict)
 
@@ -255,7 +255,7 @@ class ConceptDecoder:
         X_test = data_dict['X_test']
         y_train = data_dict['y_train']
         y_test = data_dict['y_test']
-        print(f"split sizes: X_train: {X_train.shape}, X_test: {X_test.shape}, y_train: {y_train.shape}, y_test: {y_test.shape}")
+        #print(f"split sizes: X_train: {X_train.shape}, X_test: {X_test.shape}, y_train: {y_train.shape}, y_test: {y_test.shape}")
 
 
         if self.scaler:
@@ -441,7 +441,7 @@ class DecodingResultsManager:
             y=1.05
         )
         plt.tight_layout()
-        plt.show()
+        #plt.show()
 
         # Return statistics for analysis if needed
         stats = {
