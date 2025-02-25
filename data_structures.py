@@ -79,7 +79,11 @@ class PatientData:
         
         self.preSleep_concepts = self.times_dict['rel_preSleep_concept_vocalizations']
         self.postSleep_concepts = self.times_dict['rel_postSleep_concept_vocalizations']
-
+        self.mtl_areas_dict = {  # Class-level constant for MTL areas
+        '562': ['LAH'],
+        '563': ['RAH', 'LAH', 'LPHGp', 'LEC', 'RSUB-PHG'],
+        '566': ['LMH', 'RMH', 'LAC']
+        }
 
     def _get_relative_times(self) -> Dict[str, str]:
         """
@@ -245,14 +249,32 @@ class PatientData:
         else:
             raise Exception("invalid epoch name")
     
-    def filter_neurons_by_fr(self, window: Tuple[float, float] | None, threshold: float):
-        return [neuron for neuron in self.neurons if neuron.firing_rate(window=window) >= threshold]
+    def filter_neurons_by_fr(self, neurons: List[Neuron], window: Tuple[float, float] | None, threshold: float):
+        return [neuron for neuron in neurons if neuron.firing_rate(window=window) >= threshold]
 
-    def filter_neurons_by_area(self, areas: List[str]) -> List[Neuron]:
+    def filter_neurons_by_area(self, neurons: List[Neuron], areas: List[str]) -> List[Neuron]:
         """
-        returns list of neurons with areas inputted only
+        Filters neurons, keeping only those located in the specified areas.
+
+        Args:
+            areas: A list of brain area names to keep.
+        Returns:
+            A list of Neuron objects that are located in the specified areas.
         """
-        raise NotImplementedError
+        filtered_neurons = []
+        for neuron in neurons:
+            if neuron.area in areas:
+                filtered_neurons.append(neuron)
+        return filtered_neurons
+    
+    def filter_mtl_neurons(self):
+        """Filters neurons to keep only MTL neurons"""
+
+        relevant_areas = self.mtl_areas_dict[self.pid]
+        mtl_area_filtered_neurons = self.filter_neurons_by_area(relevant_areas)
+        return mtl_area_filtered_neurons
+    
+
 
 
 class Dataloader:
