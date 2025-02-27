@@ -9,4 +9,5 @@ repomix*
 
 rcc_guide*
 /old
-*cpython*
+*cpython
+*.cpython
