@@ -303,9 +303,9 @@ class ConceptDecoder:
     
 
 # %%
-class DecodingResultsManager:
+class SingleResultsManager:
     """
-    Manages decoding results for multiple concept pairs for a single patient and epoch.
+    Manages decoding results for a single patient and multiple concept pairs for a single patient and epoch.
     """
     def __init__(self, patient_data: PatientData, concept_pairs: List[Tuple[str, str]], 
                  epoch: str, classifier: BaseEstimator = LinearSVC(), 
