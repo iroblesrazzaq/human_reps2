@@ -387,7 +387,7 @@ class MultiResultsManager:
             
             annotate_heatmap(ax, mean_matrix, std_matrix)
             
-            ax.set_title(f'{title} {metric.replace("test_", "").replace("_", " ").title()}', fontsize=15)
+            ax.set_title(f'{title} {metric.replace("test_", "").replace("_", " ").title()}')
             ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
 
         plt.suptitle(
