@@ -2,12 +2,10 @@
 *.csv
 *.json
 repomix* 
-
-!data_structures.ipynb
-!decoding.ipynb
 .env
 
 rcc_guide*
 /old
 *cpython
 *.cpython
+/__pychache__
