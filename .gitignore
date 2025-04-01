@@ -8,4 +8,4 @@ rcc_guide*
 /old
 *cpython
 *.cpython
-/__pychache__
+/__pychache__/
