@@ -419,120 +419,158 @@ class ConceptDataset:
         return data_dict, info
 
 
-
 class ConceptDecoder:
-    
     """
-    Handles decoding for a single concept pair
-
-    - design choice - will call dataset method in each decoder call?
-
-    - problem is that generally we want an object associated with one dataset - this would require an input for pseudo or not
-    in the class instantiation. however, we want fine control over pseudopops parameters, so this is less good.
-    one potential solution is a params* dict, but thats complicated. 
-
-    for consistent stuff
-
-    maybe separate classes - instantiate dataset, get training into dict, input training dict into concept decoder?
-
-    - add method for PCA visualization in 2D/3D
+    Handles decoding for either a single concept pair or groups of concepts.
+    Preserves concept identity for visualization while using binary classification.
     """
-    def __init__(self, patient_data: PatientData, c1: str, c2: str, epoch: str, classifier: BaseEstimator = LinearSVC(), 
-                 dataset: ConceptPairDataset = None, standardize: bool=False, min_samples=20, neurons=None):
+    def __init__(self, patient_data: PatientData, 
+                 c1: Union[str, Tuple[str, ...]], 
+                 c2: Union[str, Tuple[str, ...]], 
+                 epoch: str, 
+                 classifier: BaseEstimator = LinearSVC(), 
+                 dataset = None, 
+                 standardize: bool=False, 
+                 min_samples=20, 
+                 neurons=None):
+        
         self.patient_data = patient_data
-        self.c1 = c1
-        self.c2 = c2
+        # Normalize inputs to tuples for consistent handling
+        self.c1 = c1 if isinstance(c1, tuple) else (c1,)
+        self.c2 = c2 if isinstance(c2, tuple) else (c2,)
         self.epoch = epoch
         self.classifier = classifier
-        self.min_samples=min_samples
-        self.neurons=neurons
+        self.min_samples = min_samples
+        self.neurons = neurons
 
         self.scaler = StandardScaler() if standardize else None
         self.metrics = {}
-        self.enough_data = True # for efficiency
-
-
-    
-        if not dataset:
-            self.dataset = ConceptPairDataset( #type: ignore
+        self.enough_data = True
+        
+        # Detect if we're in pair mode or group mode
+        self.is_pair_mode = len(self.c1) == 1 and len(self.c2) == 1
+        
+        # Create or use provided dataset
+        if dataset is None:
+            self.dataset = ConceptDataset(
                 patient_data=self.patient_data,
-                concept_pair=(self.c1, self.c2),
-                epoch=self.epoch, 
-                min_samples = self.min_samples,
+                concepts_groups=(self.c1, self.c2),
+                epoch=self.epoch,
+                min_samples=self.min_samples,
                 neurons=self.neurons
             )
-        else: # if we're passed a dataset
+        else:
             self.dataset = dataset
-
+            
+        # Check if we have enough data
         try:
             _, _ = self.dataset.create_dataset_normal()
         except ValueError as e:
-            #print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
+            print(f"Skipping concept {'pair' if self.is_pair_mode else 'groups'} {self.c1} vs {self.c2}: {e}")
             self.enough_data = False
-        
+            
     def decode_normal(self, test_size=0.3):
+        """Perform decoding without pseudopopulations"""
         try:
             data_dict, info = self.dataset.create_dataset_normal(test_size=test_size)
         except ValueError as e:
-            #print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
-            return None # Return None to indicate decoding failure for this pair
-        return self._decode(data_dict=data_dict)
-
-
-    def decode_pseudo(self, train_size_total=300, test_size_total=100, test_size=0.3):
-        try:
-            data_dict, info = self.dataset.create_dataset_pseudo(test_size=test_size, train_size_total=train_size_total, test_size_total=test_size_total)
-        except ValueError as e:
-            #print(f"Skipping concept pair {self.c1}, {self.c2}: {e}") # Inform user of skipped pair and reason
-            return None # Return None to indicate decoding failure for this pair
-        return self._decode(data_dict=data_dict)
-
-
-
-    def _decode(self, data_dict) -> DecodingResult: 
-        """
-        Performs decoding on the concept pair using normal dataset
-        
-        Args:
-            test_size: Fraction of data to use for testing
+            print(f"Skipping concept {'pair' if self.is_pair_mode else 'groups'} {self.c1} vs {self.c2}: {e}")
+            return None
             
-        Returns:
-            DecodingResult containing metrics and predictions
+        # Transfer concept ID tracking from info to data_dict
+        if info and 'concept_ids_train' in info:
+            data_dict['concept_ids_train'] = info['concept_ids_train']
+        if info and 'concept_ids_test' in info:
+            data_dict['concept_ids_test'] = info['concept_ids_test']
+            
+        return self._decode(data_dict=data_dict)
+    
+    def decode_pseudo(self, train_size_total=200, test_size_total=67, test_size=0.3):
+        """Perform decoding with pseudopopulations for balancing"""
+        try:
+            data_dict, info = self.dataset.create_dataset_pseudo(
+                test_size=test_size,
+                train_size_total=train_size_total,
+                test_size_total=test_size_total
+            )
+        except ValueError as e:
+            print(f"Skipping concept {'pair' if self.is_pair_mode else 'groups'} {self.c1} vs {self.c2}: {e}")
+            return None
+            
+        # Transfer concept ID tracking from info to data_dict
+        if info and 'concept_ids_train' in info:
+            data_dict['concept_ids_train'] = info['concept_ids_train']
+        if info and 'concept_ids_test' in info:
+            data_dict['concept_ids_test'] = info['concept_ids_test']
+            
+        return self._decode(data_dict=data_dict)
+        
+    def _decode(self, data_dict) -> DecodingResult:
         """
-
+        Performs the actual decoding and metrics calculation.
+        
+        The crucial part here is that we:
+        1. Train the model on binary labels (0/1 for group membership)
+        2. Preserve concept identity information in the data dictionary
+        3. Return everything in the standard DecodingResult format
+        """
         X_train = data_dict['X_train']
         X_test = data_dict['X_test']
         y_train = data_dict['y_train']
         y_test = data_dict['y_test']
-        #print(f"split sizes: X_train: {X_train.shape}, X_test: {X_test.shape}, y_train: {y_train.shape}, y_test: {y_test.shape}")
-
-
+        
+        # Apply standardization if requested
         if self.scaler:
             X_train = self.scaler.fit_transform(X_train)
             X_test = self.scaler.transform(X_test)
-
+            
+        # Train classifier on binary labels
         self.classifier.fit(X_train, y_train)
         
         # Get predictions
         y_train_pred = self.classifier.predict(X_train)
         y_pred = self.classifier.predict(X_test)
-
-        # Calculate metrics for train and test
+        
+        # Calculate metrics
         train_accuracy = accuracy_score(y_train, y_train_pred)
         test_accuracy = accuracy_score(y_test, y_pred)
-        train_roc_auc = roc_auc_score(y_train, y_train_pred) # or use decision_function for prob based ROC AUC if needed
+        train_roc_auc = roc_auc_score(y_train, y_train_pred)
         test_roc_auc = roc_auc_score(y_test, y_pred)
-
         
-        train_samples = {
-            self.c1: np.sum(y_train == 0),
-            self.c2: np.sum(y_train == 1)
-        }
-        test_samples = {
-            self.c1: np.sum(y_test == 0),
-            self.c2: np.sum(y_test == 1)
-        }
-
+        # Calculate samples per concept/group
+        if self.is_pair_mode:
+            # Original format for backwards compatibility
+            train_samples = {
+                self.c1[0]: np.sum(y_train == 0),
+                self.c2[0]: np.sum(y_train == 1)
+            }
+            test_samples = {
+                self.c1[0]: np.sum(y_test == 0),
+                self.c2[0]: np.sum(y_test == 1)
+            }
+        else:
+            # Add both group totals and per-concept breakdowns
+            train_samples = {
+                'group1': np.sum(y_train == 0),
+                'group2': np.sum(y_train == 1)
+            }
+            test_samples = {
+                'group1': np.sum(y_test == 0),
+                'group2': np.sum(y_test == 1)
+            }
+            
+            # Add per-concept counts when concept identities are available
+            if 'concept_ids_train' in data_dict:
+                concept_ids_train = data_dict['concept_ids_train']
+                for concept in set(concept_ids_train):
+                    train_samples[concept] = np.sum(concept_ids_train == concept)
+                    
+            if 'concept_ids_test' in data_dict:
+                concept_ids_test = data_dict['concept_ids_test']
+                for concept in set(concept_ids_test):
+                    test_samples[concept] = np.sum(concept_ids_test == concept)
+        
+        # Create and return standard result object
         return DecodingResult(
             train_accuracy=train_accuracy,
             train_roc_auc=train_roc_auc,
@@ -543,9 +581,8 @@ class ConceptDecoder:
             predictions=y_pred,
             true_labels=y_test,
             classifier=self.classifier,
-            data=data_dict
+            data=data_dict  # Contains concept identity information
         )
-
 
 
         
