@@ -6,6 +6,3 @@ repomix*
 
 rcc_guide*
 /old
-*cpython
-*.cpython
-/__pychache__/
