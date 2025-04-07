@@ -591,40 +591,78 @@ class ConceptDecoder:
 # %%
 class SingleResultsManager:
     """
-    Manages decoding results for a single patient and multiple concept pairs for a single patient and epoch.
+    Manages decoding results for a single patient and multiple concept pairs/groups for a single patient and epoch.
+    
+    This enhanced version handles both:
+    - Traditional concept pairs: ('J.Bauer', 'C.OBrian')
+    - Concept groups: (('J.Bauer', 'T.Lennox'), ('C.OBrian', 'A.Fayed'))
     """
-    def __init__(self, patient_data: PatientData, concept_pairs: List[Tuple[str, str]], 
+    def __init__(self, patient_data: PatientData, concept_items: List[Tuple], 
                  epoch: str, classifier: BaseEstimator = LinearSVC(), 
                  standardize: bool = False, pseudo=False, neurons=None, **pseudo_kwargs):
+        """
+        Initialize with concept pairs or groups.
+        
+        Args:
+            patient_data: PatientData object for a single patient
+            concept_items: List of concept pairs or concept groups to decode
+                - For pairs: List of tuples like [('J.Bauer', 'C.OBrian'), ...]
+                - For groups: List of tuples like [(('J.Bauer', 'T.Lennox'), ('C.OBrian', 'A.Fayed')), ...]
+                - Can mix pairs and groups in the same list
+            epoch: Data epoch ('movie', 'preSleep_recall', etc.)
+            classifier: Classifier to use for decoding (default: LinearSVC)
+            standardize: Whether to standardize features
+            pseudo: Whether to use pseudopopulations
+            neurons: List of neurons to use (optional)
+            **pseudo_kwargs: Additional parameters for pseudopopulation generation
+        """
         self.patient_data = patient_data
-        self.concept_pairs = concept_pairs
+        self.concept_items = concept_items
         self.epoch = epoch
-        self.classifier = classifier # Default classifier for all decoders, can be overridden
-        self.standardize = standardize # Default standardization for all decoders
-        self.results: Dict[List[Tuple[str, str]], DecodingResult] = {} # Store results here, key is concept pair
+        self.classifier = classifier
+        self.standardize = standardize
+        self.results = {}  # Store results here
         self.pseudo = pseudo
         self.pseudo_params = pseudo_kwargs
         self.neurons = neurons
+        
+        # Detect if we're using the old format (all pairs) or mixed/new format
+        self.all_pairs = all(isinstance(item[0], str) and isinstance(item[1], str) 
+                             for item in concept_items)
 
-    def run_decoding_for_pairs(self, num_iter: int = 1) -> None:
+    def run_decoding(self, num_iter: int = 1) -> None:
         """
-        Runs decoding for all concept pairs provided in the constructor.
+        Runs decoding for all concept pairs or groups provided in the constructor.
         Stores the DecodingResult in the self.results dictionary.
+        
+        Args:
+            num_iter: Number of iterations to run for each pair/group
         """
-        self.results = {} # reset results every time
-        for c1, c2 in tqdm(self.concept_pairs, desc=f"Decoding for {self.patient_data.pid}"):
+        self.results = {}  # Reset results every time
+        
+        for item in tqdm(self.concept_items, desc=f"Decoding for {self.patient_data.pid}"):
+            # Process the item to extract c1 and c2 (either strings or tuples)
+            if isinstance(item[0], tuple) or isinstance(item[1], tuple):
+                # Group mode
+                c1, c2 = item
+            else:
+                # Pair mode
+                c1, c2 = item[0], item[1]
+                
+            # Create decoder
             decoder = ConceptDecoder(
-                    patient_data=self.patient_data,
-                    c1=c1,
-                    c2=c2,
-                    epoch=self.epoch,
-                    classifier=self.classifier,
-                    standardize=self.standardize,
-                    neurons=self.neurons
-                )
-            if decoder.enough_data: # efficient way of not rechecking for sufficient samples
+                patient_data=self.patient_data,
+                c1=c1,
+                c2=c2,
+                epoch=self.epoch,
+                classifier=self.classifier,
+                standardize=self.standardize,
+                neurons=self.neurons
+            )
+            
+            if decoder.enough_data:  # Efficient way of not rechecking for sufficient samples
                 for i in range(num_iter):
-                    #print(f"concept decoding: {c1} vs {c2}, iteration #{i}")
+                    result = None
                     if self.pseudo:
                         if self.pseudo_params:
                             result = decoder.decode_pseudo(**self.pseudo_params)
@@ -632,23 +670,45 @@ class SingleResultsManager:
                             result = decoder.decode_pseudo()
                     else:
                         result = decoder.decode_normal()
-                    if result is not None: # Only store if decode was successful (not None)
-                        if (c1, c2) not in self.results:
-                            self.results[(c1, c2)] = [result]
+                        
+                    if result is not None:  # Only store if decode was successful
+                        # Use the original item as key to maintain the format
+                        if item not in self.results:
+                            self.results[item] = [result]
                         else:
-                                self.results[(c1, c2)].append(result)
-
+                            self.results[item].append(result)
+    
+    # Keep for backward compatibility
+    def run_decoding_for_pairs(self, num_iter: int = 1) -> None:
+        """
+        Backward compatibility method that calls run_decoding.
+        
+        Args:
+            num_iter: Number of iterations to run for each pair/group
+        """
+        return self.run_decoding(num_iter)
 
     def plot_train_test_performance_heatmap(self, metric='test_roc_auc', figsize=(20, 10)):
         """
-        Generates and displays a combined heatmap of training and testing performance for all concept pairs.
+        Generates and displays a combined heatmap of training and testing performance.
         For multiple iterations, shows mean performance with standard deviation in parentheses.
+        
+        This method is optimized for concept pairs. For concept groups, consider using
+        plot_group_performance instead.
         
         Args:
             metric (str): One of 'test_accuracy', 'train_accuracy', 'test_roc_auc', 'train_roc_auc'
             figsize (tuple): Figure size for the plot
         """
-        concepts = sorted(list(set([c for pair in self.concept_pairs for c in pair])))
+        # Only collect individual concepts from pairs, not from groups
+        pair_items = [item for item in self.concept_items 
+                     if isinstance(item[0], str) and isinstance(item[1], str)]
+        
+        if not pair_items:
+            print("No concept pairs available for heatmap visualization.")
+            return None
+            
+        concepts = sorted(list(set([c for pair in pair_items for c in pair])))
         n_concepts = len(concepts)
         
         # Initialize matrices for means and standard deviations
@@ -659,9 +719,13 @@ class SingleResultsManager:
 
         concept_to_idx = {concept: i for i, concept in enumerate(concepts)}
 
-        for concept_pair, results in self.results.items():
+        for item, results in self.results.items():
+            # Skip group items
+            if not (isinstance(item[0], str) and isinstance(item[1], str)):
+                continue
+                
             if results:  # Check if results exist for this pair
-                c1, c2 = concept_pair
+                c1, c2 = item
                 i, j = concept_to_idx[c1], concept_to_idx[c2]
                 
                 # Extract values for all iterations
@@ -727,7 +791,6 @@ class SingleResultsManager:
             y=1.05
         )
         plt.tight_layout()
-        #plt.show()
 
         # Return statistics for analysis if needed
         stats = {
@@ -737,3 +800,64 @@ class SingleResultsManager:
             'test_std': test_std_matrix
         }
         return stats
+        
+    def plot_group_performance(self, metric='test_roc_auc', figsize=(10, 6)):
+        """
+        Generates a bar chart showing performance for concept groups.
+        
+        Args:
+            metric (str): One of 'test_accuracy', 'train_accuracy', 'test_roc_auc', 'train_roc_auc'
+            figsize (tuple): Figure size for the plot
+        """
+        # Filter for group items
+        group_items = [item for item in self.concept_items 
+                      if isinstance(item[0], tuple) or isinstance(item[1], tuple)]
+        
+        if not group_items:
+            print("No concept groups available for visualization.")
+            return None
+            
+        # Prepare data for plotting
+        group_labels = []
+        performance_values = []
+        error_values = []
+        
+        for item in group_items:
+            if item in self.results and self.results[item]:
+                # Create label for this group pair
+                if isinstance(item[0], tuple) and isinstance(item[1], tuple):
+                    group1_str = '+'.join(item[0])
+                    group2_str = '+'.join(item[1])
+                    label = f"{group1_str} vs {group2_str}"
+                else:
+                    # Mixed format (one group, one concept)
+                    group1 = '+'.join(item[0]) if isinstance(item[0], tuple) else item[0]
+                    group2 = '+'.join(item[1]) if isinstance(item[1], tuple) else item[1]
+                    label = f"{group1} vs {group2}"
+                    
+                group_labels.append(label)
+                
+                # Get performance for this group
+                results = self.results[item]
+                if 'roc_auc' in metric:
+                    values = [getattr(r, metric) for r in results]
+                else:
+                    values = [getattr(r, metric) for r in results]
+                
+                performance_values.append(np.mean(values))
+                error_values.append(np.std(values))
+        
+        # Create the plot
+        fig, ax = plt.subplots(figsize=figsize)
+        bars = ax.bar(range(len(group_labels)), performance_values, 
+                     yerr=error_values, align='center', alpha=0.7)
+        
+        ax.set_xticks(range(len(group_labels)))
+        ax.set_xticklabels(group_labels, rotation=45, ha='right')
+        ax.set_ylim(0, 1.0)
+        ax.set_ylabel(f'{metric.replace("test_", "").replace("_", " ").title()}')
+        ax.set_title(f'Group Decoding Performance\nPatient {self.patient_data.pid}, Epoch: {self.epoch}')
+        
+        plt.tight_layout()
+        
+        return {'group_labels': group_labels, 'performance': performance_values, 'error': error_values}
