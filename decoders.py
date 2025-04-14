@@ -523,6 +523,8 @@ class ConceptDecoder:
         if self.scaler:
             X_train = self.scaler.fit_transform(X_train)
             X_test = self.scaler.transform(X_test)
+            data_dict['X_train'] = X_train # put scaled values back in data matrix
+            data_dict['X_test'] = X_test
             
         # Train classifier on binary labels
         self.classifier.fit(X_train, y_train)
