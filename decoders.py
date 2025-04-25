@@ -12,6 +12,8 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+from collections import defaultdict
+import random
 
 @dataclass
 class DecodingResult:
@@ -147,276 +149,395 @@ class ConceptDataset:
     def _gather_data_for_group(self, group, other_group):
         """
         Gather data for all concepts in one group, ensuring exclusivity with other group.
-        
+        MODIFIED to return onset times.
+
         Returns:
             all_data: Combined neural data for the group
             concept_ids: List identifying which concept each sample came from
+            all_onset_times: List of onset times corresponding to each sample
         """
         all_data = []
         concept_ids = []
-        
+        all_onset_times = [] # <<< Added
+
         for concept in group:
-            # Get onsets where this concept appears and ALL concepts from other_group are absent
+            # Assume _get_exclusive_onsets returns times
             onset_times = self._get_exclusive_onsets_for_concept(concept, other_group)
-            
+
             if len(onset_times) < self.min_samples:
                 print(f"Warning: Insufficient exclusive onsets for {concept} vs {other_group}")
                 continue
-                
-            # Create neural response bins for these onset times
+
             concept_data = self.patient_data._bin_times(
-                times=list(onset_times), 
+                times=list(onset_times),
                 neurons=self.neurons or self.patient_data.neurons
             )
-            
-            # Add data and track concept identity
+
             if len(concept_data) >= self.min_samples:
                 all_data.append(concept_data)
                 concept_ids.extend([concept] * len(concept_data))
-        
+                all_onset_times.extend(list(onset_times)) # <<< Added: store the times
+
         if not all_data:
             raise ValueError(f"Insufficient data for any concept in {group} vs {other_group}")
-            
-        return np.vstack(all_data), concept_ids
+
+
+        return np.vstack(all_data), concept_ids, np.array(all_onset_times)
     
-    def create_dataset_normal(self, test_size=0.3):
+    
+    def _temporal_block_split(self, X, y, onset_times, test_size, T_separation, concept_ids=None):
         """
-        Create dataset without pseudopopulations.
-        
+        Splits data into train/test sets ensuring temporal separation between sets.
+
+        Args:
+            X (np.ndarray): Feature matrix (samples x neurons).
+            y (np.ndarray): Label vector (0 or 1).
+            onset_times (np.ndarray): Onset time for each sample in X.
+            test_size (float): Approximate fraction of samples for the test set.
+            T_separation (float): Minimum time gap (in seconds) required between
+                                   any train sample onset and any test sample onset.
+            concept_ids (np.ndarray, optional): Specific concept IDs for each sample.
+
         Returns:
-            data_dict: Dictionary containing X_train, X_test, y_train, y_test
-            info: Dictionary with additional information including concept tracking
+            tuple: (train_indices, test_indices) - Lists of original indices.
         """
-        # Handle pair mode using the original implementation
+        if len(onset_times) == 0:
+             return np.array([], dtype=int), np.array([], dtype=int)
+
+        n_samples = len(onset_times)
+        original_indices = np.arange(n_samples)
+
+        # 1. Sort onsets and keep track of original indices
+        sorted_indices = np.argsort(onset_times)
+        sorted_onsets = onset_times[sorted_indices]
+        sorted_original_indices = original_indices[sorted_indices] # Map position in sorted list back to original index
+
+        # 2. Identify Temporal Blocks (Connected Components)
+        adj = defaultdict(list)
+        # Build adjacency list based on T_separation violation
+        # More efficient than N^2: only check nearby points in sorted list
+        for i in range(n_samples):
+            for j in range(i + 1, n_samples):
+                # If onset difference is less than T_separation, they are connected
+                if sorted_onsets[j] - sorted_onsets[i] < T_separation:
+                    adj[i].append(j)
+                    adj[j].append(i)
+                else:
+                    # Since the list is sorted, no further 'j' will be close enough to 'i'
+                    break
+
+        # Find connected components (temporal blocks) using DFS/BFS
+        visited = set()
+        blocks = [] # List of blocks, each block is a list of *sorted* indices
+        for i in range(n_samples):
+            if i not in visited:
+                component = []
+                q = [i] # Use list as a queue/stack for BFS/DFS
+                visited.add(i)
+                while q:
+                    u = q.pop(0) # BFS style
+                    component.append(u)
+                    for v in adj[u]:
+                        if v not in visited:
+                            visited.add(v)
+                            q.append(v)
+                blocks.append(component) # Add the found component/block
+
+        # Map block indices from sorted positions back to original indices
+        original_indices_blocks = []
+        for block in blocks:
+            original_indices_blocks.append(list(sorted_original_indices[block]))
+
+        # 3. Randomly Assign Blocks to Train/Test
+        n_test_target = int(n_samples * test_size)
+        block_sizes = [len(block) for block in original_indices_blocks]
+        block_indices = list(range(len(original_indices_blocks)))
+
+        random.shuffle(block_indices) # Shuffle the order of blocks
+
+        test_indices_list = []
+        train_indices_list = []
+        current_test_size = 0
+
+        for i in block_indices:
+            block_original_idxs = original_indices_blocks[i]
+            # Assign to test set if we haven't met the target size yet
+            if current_test_size < n_test_target:
+                test_indices_list.extend(block_original_idxs)
+                current_test_size += len(block_original_idxs)
+            else:
+                # Assign to train set otherwise
+                train_indices_list.extend(block_original_idxs)
+
+        # Handle edge case: if the first N blocks overshoot test_size significantly,
+        # it might be better to assign the last added block to train instead.
+        # (Could add more sophisticated balancing later if needed)
+
+        return np.array(train_indices_list, dtype=int), np.array(test_indices_list, dtype=int)
+
+    # --- Modifications needed in data gathering ---
+    # Assume patient_data.get_concept_data and _gather_data_for_group now return
+    # a tuple like: (neural_data_matrix, concept_ids_or_labels, onset_times_vector)
+
+    def create_dataset_normal(self, test_size=0.3, T_separation=21.0):
+        """
+        Create dataset without pseudopopulations, using temporal block split.
+        """
+        all_X_list = []
+        all_y_list = []
+        all_onsets_list = []
+        all_concept_ids_list = [] # Only used in group mode
+
         if self.is_pair_mode:
             c1, c2 = self.group1[0], self.group2[0]
             try:
-                c1_data, c2_data = self.patient_data.get_concept_data(
-                    c1=c1, c2=c2, epoch=self.epoch, neurons=self.neurons
-                )
-                
-                if len(c1_data) < self.min_samples or len(c2_data) < self.min_samples:
+                # Assuming get_concept_data returns (data, labels, times) format
+                # Needs adaptation if get_concept_data structure is different
+                # Simplified: assume it returns c1_data, c2_data which are (samples, neurons)
+                # We need the *times* associated with those samples.
+                # Let's reconstruct:
+                c1_onset_times = self.patient_data.exclusive_movie_times(c1=c1, c2=c2)
+                c2_onset_times = self.patient_data.exclusive_movie_times(c1=c2, c2=c1)
+
+                if len(c1_onset_times) < self.min_samples or len(c2_onset_times) < self.min_samples:
                     raise ValueError(f"Insufficient samples for {c1} vs {c2}")
-                    
+
+                c1_data = self.patient_data._bin_times(list(c1_onset_times), self.neurons or self.patient_data.neurons)
+                c2_data = self.patient_data._bin_times(list(c2_onset_times), self.neurons or self.patient_data.neurons)
+
                 X = np.vstack([c1_data, c2_data])
                 y = np.concatenate([np.zeros(len(c1_data)), np.ones(len(c2_data))])
-                
-                # Track concept identity
-                concept_ids = [c1] * len(c1_data) + [c2] * len(c2_data)
-            
+                onset_times = np.concatenate([c1_onset_times, c2_onset_times])
+                concept_ids = np.array([c1] * len(c1_data) + [c2] * len(c2_data)) # Track concepts
+
             except ValueError as e:
-                raise ValueError(f"Error in pair mode: {e}")
-                
-        # Handle group mode
+                raise ValueError(f"Error getting pair data: {e}")
         else:
+            # Group mode - Use _gather_data_for_group
             try:
                 # Gather data for group 1 (concepts labeled 0)
-                group1_data, group1_concept_ids = self._gather_data_for_group(
+                group1_data, group1_concept_ids, group1_onsets = self._gather_data_for_group(
                     self.group1, self.group2
                 )
-                
+                all_X_list.append(group1_data)
+                all_y_list.append(np.zeros(len(group1_data)))
+                all_onsets_list.append(group1_onsets)
+                all_concept_ids_list.extend(group1_concept_ids)
+
                 # Gather data for group 2 (concepts labeled 1)
-                group2_data, group2_concept_ids = self._gather_data_for_group(
+                group2_data, group2_concept_ids, group2_onsets = self._gather_data_for_group(
                     self.group2, self.group1
                 )
-                
-                X = np.vstack([group1_data, group2_data])
-                y = np.concatenate([np.zeros(len(group1_data)), np.ones(len(group2_data))])
-                
-                # Track concept identity
-                concept_ids = group1_concept_ids + group2_concept_ids
-                
+                all_X_list.append(group2_data)
+                all_y_list.append(np.ones(len(group2_data)))
+                all_onsets_list.append(group2_onsets)
+                all_concept_ids_list.extend(group2_concept_ids)
+
+                X = np.vstack(all_X_list)
+                y = np.concatenate(all_y_list)
+                onset_times = np.concatenate(all_onsets_list)
+                concept_ids = np.array(all_concept_ids_list) # Track concepts
+
             except ValueError as e:
-                raise ValueError(f"Error in group mode: {e}")
-        
-        # Create stratified train/test split
-        # We split by group (y), but we also track concept_ids
-        # sklearn's train_test_split can handle multiple arrays
-        X_train, X_test, y_train, y_test, ids_train, ids_test = train_test_split(
-            X, y, np.array(concept_ids), test_size=test_size, stratify=y
+                raise ValueError(f"Error getting group data: {e}")
+
+        # Perform the temporal split on the combined real data
+        train_indices, test_indices = self._temporal_block_split(
+            X, y, onset_times, test_size=test_size, T_separation=T_separation
         )
-        
-        # Return results
+
+        # Create the final splits
+        X_train, X_test = X[train_indices], X[test_indices]
+        y_train, y_test = y[train_indices], y[test_indices]
+
+        # Prepare info dict, including concept IDs if available
         info = {
-            'concept_ids_train': ids_train,
-            'concept_ids_test': ids_test,
-            'group1': self.group1,
-            'group2': self.group2
-        }
-        
-        data_dict = {
-            'X_train': X_train, 
-            'X_test': X_test, 
-            'y_train': y_train, 
-            'y_test': y_test
-        }
-        
-        return data_dict, info
-    
-    def create_dataset_pseudo(self, test_size=0.3, train_size_total=100, test_size_total=50):
-        """
-        Create dataset with pseudopopulations to balance and augment data.
-        
-        For group mode, train_size_total and test_size_total are per group,
-        distributed evenly among concepts in the group.
-        
-        Returns:
-            data_dict: Dictionary containing X_train, X_test, y_train, y_test
-            info: Dictionary with additional information including concept tracking
-        """
-        # First separate data by concepts, following pair and group modes
-        concept_data_dict = {}  # Will hold data for each concept
-        
-        if self.is_pair_mode:
-            # Get data for the single concepts in pair mode
-            c1, c2 = self.group1[0], self.group2[0]
-            try:
-                c1_data, c2_data = self.patient_data.get_concept_data(
-                    c1=c1, c2=c2, epoch=self.epoch, neurons=self.neurons
-                )
-                concept_data_dict[c1] = c1_data
-                concept_data_dict[c2] = c2_data
-            except ValueError as e:
-                raise ValueError(f"Error in pair mode: {e}")
-                
-        else:
-            # Get data for all concepts in both groups
-            for group, other_group in [(self.group1, self.group2), (self.group2, self.group1)]:
-                for concept in group:
-                    onset_times = self._get_exclusive_onsets_for_concept(concept, other_group)
-                    if len(onset_times) < self.min_samples:
-                        print(f"Warning: Insufficient exclusive onsets for {concept} vs {other_group}")
-                        continue
-                        
-                    concept_data = self.patient_data._bin_times(
-                        times=list(onset_times), 
-                        neurons=self.neurons or self.patient_data.neurons
-                    )
-                    
-                    if len(concept_data) >= self.min_samples:
-                        concept_data_dict[concept] = concept_data
-        
-        # Check if we have enough concepts with enough data
-        if not concept_data_dict:
-            raise ValueError("No concepts with sufficient data")
-            
-        if self.is_pair_mode and (len(concept_data_dict) < 2 or 
-                                 self.group1[0] not in concept_data_dict or 
-                                 self.group2[0] not in concept_data_dict):
-            raise ValueError(f"Insufficient data for pair {self.group1[0]} vs {self.group2[0]}")
-            
-        # Now we have all concept data, proceed with train/test splits and pseudopopulations
-        all_train_data = []
-        all_test_data = []
-        all_train_labels = []
-        all_test_labels = []
-        all_train_concept_ids = []
-        all_test_concept_ids = []
-        
-        # Process group 1 concepts
-        valid_group1_concepts = [c for c in self.group1 if c in concept_data_dict]
-        if valid_group1_concepts:
-            # Calculate per-concept targets for group 1
-            train_size_per_concept = train_size_total // len(valid_group1_concepts)
-            test_size_per_concept = test_size_total // len(valid_group1_concepts)
-            
-            for concept in valid_group1_concepts:
-                data = concept_data_dict[concept]
-                # Split data for this concept
-                concept_train, concept_test = train_test_split(data, test_size=test_size)
-                
-                # Calculate needed pseudopopulations
-                n_pseudo_train = max(0, train_size_per_concept - len(concept_train))
-                n_pseudo_test = max(0, test_size_per_concept - len(concept_test))
-                
-                # Generate pseudopopulations for this concept
-                if n_pseudo_train > 0:
-                    concept_train = generate_pseudopopulations(concept_train, n_pseudo=n_pseudo_train)
-                if n_pseudo_test > 0:
-                    concept_test = generate_pseudopopulations(concept_test, n_pseudo=n_pseudo_test)
-                
-                # Add to combined arrays
-                all_train_data.append(concept_train)
-                all_test_data.append(concept_test)
-                all_train_labels.extend([0] * len(concept_train))  # Group 1 = 0
-                all_test_labels.extend([0] * len(concept_test))    # Group 1 = 0
-                all_train_concept_ids.extend([concept] * len(concept_train))
-                all_test_concept_ids.extend([concept] * len(concept_test))
-        else:
-            raise ValueError(f"No valid concepts with sufficient data in group 1: {self.group1}")
-            
-        # Process group 2 concepts
-        valid_group2_concepts = [c for c in self.group2 if c in concept_data_dict]
-        if valid_group2_concepts:
-            # Calculate per-concept targets for group 2
-            train_size_per_concept = train_size_total // len(valid_group2_concepts)
-            test_size_per_concept = test_size_total // len(valid_group2_concepts)
-            
-            for concept in valid_group2_concepts:
-                data = concept_data_dict[concept]
-                # Split data for this concept
-                concept_train, concept_test = train_test_split(data, test_size=test_size)
-                
-                # Calculate needed pseudopopulations
-                n_pseudo_train = max(0, train_size_per_concept - len(concept_train))
-                n_pseudo_test = max(0, test_size_per_concept - len(concept_test))
-                
-                # Generate pseudopopulations for this concept
-                if n_pseudo_train > 0:
-                    concept_train = generate_pseudopopulations(concept_train, n_pseudo=n_pseudo_train)
-                if n_pseudo_test > 0:
-                    concept_test = generate_pseudopopulations(concept_test, n_pseudo=n_pseudo_test)
-                
-                # Add to combined arrays
-                all_train_data.append(concept_train)
-                all_test_data.append(concept_test)
-                all_train_labels.extend([1] * len(concept_train))  # Group 2 = 1
-                all_test_labels.extend([1] * len(concept_test))    # Group 2 = 1
-                all_train_concept_ids.extend([concept] * len(concept_train))
-                all_test_concept_ids.extend([concept] * len(concept_test))
-        else:
-            raise ValueError(f"No valid concepts with sufficient data in group 2: {self.group2}")
-        
-        # Combine and shuffle
-        X_train = np.vstack(all_train_data)
-        X_test = np.vstack(all_test_data)
-        y_train = np.array(all_train_labels)
-        y_test = np.array(all_test_labels)
-        concept_ids_train = np.array(all_train_concept_ids)
-        concept_ids_test = np.array(all_test_concept_ids)
-        
-        # Shuffle training data
-        train_shuffle_idx = np.random.permutation(len(y_train))
-        X_train = X_train[train_shuffle_idx]
-        y_train = y_train[train_shuffle_idx]
-        concept_ids_train = concept_ids_train[train_shuffle_idx]
-        
-        # Shuffle test data
-        test_shuffle_idx = np.random.permutation(len(y_test))
-        X_test = X_test[test_shuffle_idx]
-        y_test = y_test[test_shuffle_idx]
-        concept_ids_test = concept_ids_test[test_shuffle_idx]
-        
-        # Create info dictionary with details about the dataset
-        info = {
-            'concept_ids_train': concept_ids_train,
-            'concept_ids_test': concept_ids_test,
             'group1': self.group1,
             'group2': self.group2,
-            'valid_group1_concepts': valid_group1_concepts,
-            'valid_group2_concepts': valid_group2_concepts,
-            'real_samples_per_concept': {c: len(concept_data_dict.get(c, [])) for c in 
-                                         list(self.group1) + list(self.group2)},
+            'train_indices_original': train_indices, # Optional: for debugging
+            'test_indices_original': test_indices   # Optional: for debugging
         }
-        
+        if 'concept_ids' in locals() and concept_ids is not None:
+             info['concept_ids_train'] = concept_ids[train_indices]
+             info['concept_ids_test'] = concept_ids[test_indices]
+
+
         data_dict = {
-            'X_train': X_train, 
-            'X_test': X_test, 
-            'y_train': y_train, 
+            'X_train': X_train,
+            'X_test': X_test,
+            'y_train': y_train,
             'y_test': y_test
         }
-        
+
         return data_dict, info
+
+
+    def create_dataset_pseudo(self, test_size=0.3, train_size_total=100, test_size_total=50, T_separation=21.0):
+        """
+        Create dataset with pseudopopulations, using temporal block split on real data first.
+        """
+        # 1. Gather all *real* data first (similar to start of create_dataset_normal)
+        real_X_list = []
+        real_y_list = []
+        real_onsets_list = []
+        real_concept_ids_list = [] # Store specific concept ID for each real sample
+
+        # This part needs careful implementation based on how data is retrieved.
+        # Let's assume we can get data per concept with associated times.
+        concept_real_data = {} # Dict: concept_name -> (data_matrix, onset_times_vector)
+        all_concepts_in_groups = list(self.group1) + list(self.group2)
+
+        for concept in all_concepts_in_groups:
+             # Determine which concepts this one needs to be exclusive against
+             other_group = self.group2 if concept in self.group1 else self.group1
+             try:
+                 # Get onsets exclusive to the other group
+                 onset_times = self._get_exclusive_onsets_for_concept(concept, other_group)
+                 if len(onset_times) >= self.min_samples:
+                     data = self.patient_data._bin_times(list(onset_times), self.neurons or self.patient_data.neurons)
+                     if len(data) >= self.min_samples:
+                          concept_real_data[concept] = (data, onset_times)
+                 else:
+                     print(f"Warning: Insufficient real onsets for {concept} during initial gathering.")
+             except ValueError as e:
+                 print(f"Warning: Error gathering real data for {concept}: {e}")
+                 continue # Skip this concept if error
+
+        # Combine into single arrays for splitting
+        for concept, (data, times) in concept_real_data.items():
+             real_X_list.append(data)
+             label = 0 if concept in self.group1 else 1
+             real_y_list.append(np.full(len(data), label))
+             real_onsets_list.append(times)
+             real_concept_ids_list.extend([concept] * len(data))
+
+        if not real_X_list:
+            raise ValueError("Insufficient real data across all concepts to proceed.")
+
+        real_X = np.vstack(real_X_list)
+        real_y = np.concatenate(real_y_list)
+        real_onsets = np.concatenate(real_onsets_list)
+        real_concept_ids = np.array(real_concept_ids_list)
+
+        # 2. Perform temporal split on the *real* data
+        train_indices, test_indices = self._temporal_block_split(
+            real_X, real_y, real_onsets, test_size=test_size, T_separation=T_separation
+        )
+
+        # 3. Partition the real data based on the split
+        real_X_train, real_X_test = real_X[train_indices], real_X[test_indices]
+        real_y_train, real_y_test = real_y[train_indices], real_y[test_indices]
+        real_concept_ids_train = real_concept_ids[train_indices]
+        real_concept_ids_test = real_concept_ids[test_indices]
+
+        # 4. Generate Pseudopopulations *Separately* for Train and Test
+        final_X_train_list, final_y_train_list, final_concept_ids_train_list = [], [], []
+        final_X_test_list, final_y_test_list, final_concept_ids_test_list = [], [], []
+
+        # Determine target samples per group (adjust based on valid concepts)
+        valid_group1_concepts = [c for c in self.group1 if c in concept_real_data]
+        valid_group2_concepts = [c for c in self.group2 if c in concept_real_data]
+
+        train_size_per_concept_g1 = train_size_total // len(valid_group1_concepts) if valid_group1_concepts else 0
+        test_size_per_concept_g1 = test_size_total // len(valid_group1_concepts) if valid_group1_concepts else 0
+        train_size_per_concept_g2 = train_size_total // len(valid_group2_concepts) if valid_group2_concepts else 0
+        test_size_per_concept_g2 = test_size_total // len(valid_group2_concepts) if valid_group2_concepts else 0
+
+        # Process Training Set Pseudos
+        for concept in concept_real_data.keys(): # Iterate through concepts with real data
+            is_group1 = concept in self.group1
+            target_train_size = train_size_per_concept_g1 if is_group1 else train_size_per_concept_g2
+
+            # Find real samples of this concept *in the training set*
+            mask_train = (real_concept_ids_train == concept)
+            concept_real_train_data = real_X_train[mask_train]
+
+            if len(concept_real_train_data) == 0:
+                 print(f"Warning: No real samples for concept '{concept}' landed in the training set after temporal split.")
+                 # Optionally, add the existing real samples if any, even if 0
+                 final_X_train_list.append(concept_real_train_data) # Append empty or few samples
+                 final_y_train_list.append(real_y_train[mask_train])
+                 final_concept_ids_train_list.extend(list(real_concept_ids_train[mask_train]))
+                 continue
+
+            n_pseudo_train = max(0, target_train_size - len(concept_real_train_data))
+
+            if n_pseudo_train > 0:
+                 concept_train_combined = generate_pseudopopulations(concept_real_train_data, n_pseudo=n_pseudo_train)
+            else:
+                 # If we have enough or too many real samples, just use them (or potentially subsample later if strict size needed)
+                 concept_train_combined = concept_real_train_data[:target_train_size] # Simple truncation if over target
+
+            final_X_train_list.append(concept_train_combined)
+            label = 0 if is_group1 else 1
+            final_y_train_list.append(np.full(len(concept_train_combined), label))
+            final_concept_ids_train_list.extend([concept] * len(concept_train_combined))
+
+        # Process Testing Set Pseudos (similarly)
+        for concept in concept_real_data.keys():
+            is_group1 = concept in self.group1
+            target_test_size = test_size_per_concept_g1 if is_group1 else test_size_per_concept_g2
+
+            mask_test = (real_concept_ids_test == concept)
+            concept_real_test_data = real_X_test[mask_test]
+
+            if len(concept_real_test_data) == 0:
+                 print(f"Warning: No real samples for concept '{concept}' landed in the test set after temporal split.")
+                 final_X_test_list.append(concept_real_test_data)
+                 final_y_test_list.append(real_y_test[mask_test])
+                 final_concept_ids_test_list.extend(list(real_concept_ids_test[mask_test]))
+                 continue
+
+            n_pseudo_test = max(0, target_test_size - len(concept_real_test_data))
+
+            if n_pseudo_test > 0:
+                 concept_test_combined = generate_pseudopopulations(concept_real_test_data, n_pseudo=n_pseudo_test)
+            else:
+                 concept_test_combined = concept_real_test_data[:target_test_size]
+
+            final_X_test_list.append(concept_test_combined)
+            label = 0 if is_group1 else 1
+            final_y_test_list.append(np.full(len(concept_test_combined), label))
+            final_concept_ids_test_list.extend([concept] * len(concept_test_combined))
+
+        # 5. Combine final lists
+        if not final_X_train_list or not final_X_test_list:
+             raise ValueError("Failed to generate sufficient data for train/test splits after pseudo-population step.")
+
+        X_train = np.vstack(final_X_train_list)
+        y_train = np.concatenate(final_y_train_list)
+        concept_ids_train = np.array(final_concept_ids_train_list)
+
+        X_test = np.vstack(final_X_test_list)
+        y_test = np.concatenate(final_y_test_list)
+        concept_ids_test = np.array(final_concept_ids_test_list)
+
+        # 6. Shuffle final sets
+        train_shuffle_idx = np.random.permutation(len(y_train))
+        X_train, y_train, concept_ids_train = X_train[train_shuffle_idx], y_train[train_shuffle_idx], concept_ids_train[train_shuffle_idx]
+
+        test_shuffle_idx = np.random.permutation(len(y_test))
+        X_test, y_test, concept_ids_test = X_test[test_shuffle_idx], y_test[test_shuffle_idx], concept_ids_test[test_shuffle_idx]
+
+        # 7. Return results
+        info = {
+            'group1': self.group1,
+            'group2': self.group2,
+            'concept_ids_train': concept_ids_train,
+            'concept_ids_test': concept_ids_test,
+            'real_samples_in_train': len(train_indices), # Number of real samples before pseudos
+            'real_samples_in_test': len(test_indices),   # Number of real samples before pseudos
+        }
+
+        data_dict = {
+            'X_train': X_train,
+            'X_test': X_test,
+            'y_train': y_train,
+            'y_test': y_test
+        }
+
+        return data_dict, info
+
 
 
 class ConceptDecoder:
@@ -472,7 +593,7 @@ class ConceptDecoder:
     def decode_normal(self, test_size=0.3):
         """Perform decoding without pseudopopulations"""
         try:
-            data_dict, info = self.dataset.create_dataset_normal(test_size=test_size)
+            data_dict, info = self.dataset.create_dataset_normal(test_size=test_size, T_separation=21)
         except ValueError as e:
             print(f"Skipping concept {'pair' if self.is_pair_mode else 'groups'} {self.c1} vs {self.c2}: {e}")
             return None
@@ -485,13 +606,14 @@ class ConceptDecoder:
             
         return self._decode(data_dict=data_dict)
     
-    def decode_pseudo(self, train_size_total=200, test_size_total=67, test_size=0.3):
+    def decode_pseudo(self, train_size_total=200, test_size_total=67, test_size=0.3, T_separation=21):
         """Perform decoding with pseudopopulations for balancing"""
         try:
             data_dict, info = self.dataset.create_dataset_pseudo(
                 test_size=test_size,
                 train_size_total=train_size_total,
-                test_size_total=test_size_total
+                test_size_total=test_size_total,
+                T_separation=T_separation
             )
         except ValueError as e:
             print(f"Skipping concept {'pair' if self.is_pair_mode else 'groups'} {self.c1} vs {self.c2}: {e}")
@@ -519,6 +641,28 @@ class ConceptDecoder:
         y_train = data_dict['y_train']
         y_test = data_dict['y_test']
         
+        if len(y_train) == 0:
+            print(f"ERROR: Empty training set resulted from split for {self.c1} vs {self.c2}. Cannot proceed.")
+            # Return NaN for all metrics if training isn't possible
+            # Determine keys for sample dictionaries based on mode
+            train_sample_keys = {self.c1[0]: 0, self.c2[0]: 0} if self.is_pair_mode else {'group1': 0, 'group2': 0}
+            test_sample_keys = {self.c1[0]: 0, self.c2[0]: 0} if self.is_pair_mode else {'group1': 0, 'group2': 0}
+            if not self.is_pair_mode: # Add specific concept keys if group mode
+                 for concept in self.c1 + self.c2:
+                     train_sample_keys[concept] = 0
+                     test_sample_keys[concept] = 0
+
+            return DecodingResult(
+                train_accuracy=np.nan, train_roc_auc=np.nan,
+                test_accuracy=np.nan, test_roc_auc=np.nan,
+                train_samples=train_sample_keys,
+                test_samples=test_sample_keys,
+                predictions=np.array([]), true_labels=np.array([]),
+                classifier=self.classifier, # Untrained classifier instance
+                data=data_dict
+            )
+
+
         # Apply standardization if requested
         if self.scaler:
             X_train = self.scaler.fit_transform(X_train)
@@ -535,42 +679,68 @@ class ConceptDecoder:
         
         # Calculate metrics
         train_accuracy = accuracy_score(y_train, y_train_pred)
-        test_accuracy = accuracy_score(y_test, y_pred)
-        train_roc_auc = roc_auc_score(y_train, y_train_pred)
-        test_roc_auc = roc_auc_score(y_test, y_pred)
-        
-        # Calculate samples per concept/group
-        if self.is_pair_mode:
-            # Original format for backwards compatibility
-            train_samples = {
-                self.c1[0]: np.sum(y_train == 0),
-                self.c2[0]: np.sum(y_train == 1)
-            }
-            test_samples = {
-                self.c1[0]: np.sum(y_test == 0),
-                self.c2[0]: np.sum(y_test == 1)
-            }
+
+        # check for only one concept in train set - bad
+        if len(np.unique(y_train)) > 1:
+            train_roc_auc = roc_auc_score(y_train, y_train_pred)
         else:
-            # Add both group totals and per-concept breakdowns
-            train_samples = {
-                'group1': np.sum(y_train == 0),
-                'group2': np.sum(y_train == 1)
-            }
-            test_samples = {
-                'group1': np.sum(y_test == 0),
-                'group2': np.sum(y_test == 1)
-            }
-            
-            # Add per-concept counts when concept identities are available
-            if 'concept_ids_train' in data_dict:
-                concept_ids_train = data_dict['concept_ids_train']
-                for concept in set(concept_ids_train):
-                    train_samples[concept] = np.sum(concept_ids_train == concept)
-                    
-            if 'concept_ids_test' in data_dict:
-                concept_ids_test = data_dict['concept_ids_test']
-                for concept in set(concept_ids_test):
-                    test_samples[concept] = np.sum(concept_ids_test == concept)
+            print(f"Warning: Only one class present in y_train for {self.c1} vs {self.c2}. Setting train_roc_auc to NaN.")
+            train_roc_auc = np.nan
+    
+        test_set_valid_for_eval = len(y_test) > 0
+
+        if test_set_valid_for_eval:
+            # Standardize test set if necessary (using scaler fitted on train)
+            if self.scaler:
+                 X_test = self.scaler.transform(X_test)
+                 data_dict['X_test'] = X_test # Keep scaled data
+
+            # Make predictions on the test set
+            y_pred = self.classifier.predict(X_test)
+
+            # Calculate Test Accuracy (always possible if test set is not empty)
+            test_accuracy = accuracy_score(y_test, y_pred)
+
+            # Calculate Test ROC AUC (only if multiple classes present)
+            if len(np.unique(y_test)) > 1:
+                test_roc_auc = roc_auc_score(y_test, y_pred)
+            else:
+                print(f"Warning: Only one class present in y_test for {self.c1} vs {self.c2}. Setting test_roc_auc to NaN.")
+                test_roc_auc = np.nan
+        else:
+            # Test set is empty
+            print(f"Warning: Empty test set resulted from temporal split for {self.c1} vs {self.c2}. Setting test metrics to NaN.")
+            y_pred = np.array([]) # No predictions possible
+            test_accuracy = np.nan
+            test_roc_auc = np.nan
+
+
+        # --- Calculate Sample Counts ---
+        # (Ensuring keys exist even if counts are 0)
+        train_samples = {}
+        test_samples = {}
+        group1_concepts = self.c1
+        group2_concepts = self.c2
+        all_concepts = list(group1_concepts) + list(group2_concepts)
+
+        if self.is_pair_mode:
+            c1_key, c2_key = group1_concepts[0], group2_concepts[0]
+            train_samples[c1_key] = np.sum(y_train == 0)
+            train_samples[c2_key] = np.sum(y_train == 1)
+            test_samples[c1_key] = np.sum(y_test == 0) if test_set_valid_for_eval else 0
+            test_samples[c2_key] = np.sum(y_test == 1) if test_set_valid_for_eval else 0
+        else: # Group mode
+            train_samples['group1'] = np.sum(y_train == 0)
+            train_samples['group2'] = np.sum(y_train == 1)
+            test_samples['group1'] = np.sum(y_test == 0) if test_set_valid_for_eval else 0
+            test_samples['group2'] = np.sum(y_test == 1) if test_set_valid_for_eval else 0
+            # Add specific concepts
+            concept_ids_train = data_dict.get('concept_ids_train', np.array([]))
+            concept_ids_test = data_dict.get('concept_ids_test', np.array([]))
+            for concept in all_concepts:
+                train_samples[concept] = np.sum(concept_ids_train == concept)
+                test_samples[concept] = np.sum(concept_ids_test == concept) if test_set_valid_for_eval else 0
+
         
         # Create and return standard result object
         return DecodingResult(
@@ -863,3 +1033,16 @@ class SingleResultsManager:
         plt.tight_layout()
         
         return {'group_labels': group_labels, 'performance': performance_values, 'error': error_values}
+    
+
+
+
+    
+
+
+
+
+
+# --- Other methods (__init__, _normalize_concepts_input, _get_exclusive_onsets_for_concept) remain largely the same ---
+
+# End of ConceptDataset class    
