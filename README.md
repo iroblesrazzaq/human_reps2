@@ -1,29 +1,11 @@
-Second version of movie reps project
+# Geometry of Representations Analysis of Human Intracranial Neural Spiking Data from Movie Viewing and Recall
 
-TODO: Analysis!
+Second iteration of development.
 
-
-8 concept dichotomy analysis - all 35 permutations
-    - we have 11-12 good concepts -- what to do with this?
-        - all permutations of 8 concepts from 12? this gives us ~1000 plots though
-        - start with ones we decided on
-        considerations:
-            - first generate list of all 35 permutations
-            - decoding on dichotomy
-                - pseudopopulations or not -- do both?
-            - figure -- bar graph of x axis dichotomy number, y of decoding perf
-                - metric roc auc for non-pseudopops?
-        - 
-    - 
-
-
-
-
-
-
-
-random thoughts:
-can we find axis of good/bad -- and track characters across that axis over time
- -- main case would be the arab kid -- good at first but then bad 
- can we find the neural correlate of this? 
-  -- do pca of obviously good/bad characters decoder axis, plot kumar points before and after
+Created data processing pipeline to:
+- extract spike timing info from mat files
+- filter and sort neurons
+- bin neurons during concept onsets in movie and recall
+- create datasets between two concept onsets, dropping shared onsets and accounting for temporal autocorrelations
+- train linear classifiers to decode between concepts and concept groups
+- perform shattering dimensionality and Cross-Conditional Generalization Performance on the data
